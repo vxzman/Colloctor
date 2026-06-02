@@ -36,7 +36,7 @@ sudo yum install qrencode
 
 1. 下载脚本并赋予执行权限：
    ```bash
-   wget https://raw.githubusercontent.com/your-repo/wg-manager/main/wg-manager.py # 替换为实际链接或直接复制代码
+   wget https://raw.githubusercontent.com/vxzman/Colloctor/refs/heads/main/wireguard/wg-gen.py 
    chmod +x wg-manager.py
    ```
 
