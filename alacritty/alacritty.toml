@@ -1,0 +1,113 @@
+#设置改变配置自动启动 [window]的需要重启
+[general]
+live_config_reload = true
+working_directory = "C:\\Users\\kaishuai"
+
+#shell设置
+[terminal.shell]
+	program = "pwsh.exe"  # 确保这个路径匹配你的PowerShell 7实际安装路径
+    # 可选参数，"-NoExit"防止pwsh立即退出，"-Command Clear-Host"清屏
+	args = ["-NoExit", "-Command", "$Host.UI.RawUI.WindowTitle = 'pwsh'"] 
+
+#改变窗口设置
+[window]
+	#窗口大小
+	dimensions = { columns = 100, lines = 30 }
+	padding = { x = 4, y = 2 }
+	#透明度
+	opacity = 0.95
+	#窗口名字
+	dynamic_title = true
+	# 将终端内容平均分配给 padding
+	dynamic_padding = true
+	decorations = "full"
+	
+
+#字体
+[font]
+	normal = { family = "Jetbrains Mono", style = "Medium" }
+	bold = { family = "Source Code Pro", style = "Bold" }
+	italic = { family = "Source Code Pro", style = "italic" }
+	size = 12.0
+
+#颜色主题可以在github上找想要的主题，复制他的配色.
+[colors]
+	draw_bold_text_with_bright_colors = false
+	
+[colors.cursor]
+	cursor = "#00D1FF"
+	
+[colors.primary]
+#	background = "#343c44"
+#	background = "#330303"
+	background = "#2c2c34"
+	foreground = "#f5f5f5"
+	
+[colors.normal]
+	black = "#110f18"
+	blue = "#5e5bff"
+	cyan = "#51f0c5"
+	green = "#51f085"
+	magenta = "#e07bff"
+	red = "#ff5757"
+	white = "#f0f0f0"
+	yellow = "#ffd56a"
+
+[colors.bright]
+	black = "#2d2d2d"
+	blue = "#8a8aff"
+	cyan = "#71f0e5"
+	green = "#71f0a5"
+	magenta = "#f09bff"
+	red = "#ff7777"
+	white = "#ffffff"
+	yellow = "#ffee9a"
+
+[colors.search.focused_match]
+	background = "#00D1FF"
+	foreground = "#f0f0f0"
+
+[colors.search.matches]
+	background = "#ffffff"
+	foreground = "#000000" 
+
+[colors.selection]
+#	background = "#29263c"
+	background = "#808080"
+	text = "CellForeground"
+
+
+#光标
+[cursor]
+	style = { shape = "Underline", blinking = "On" }
+
+# 鼠标配置
+[mouse]
+	# 打字时隐藏鼠标
+	hide_when_typing = true
+
+[terminal]
+	#设定复制黏贴行为
+	osc52 = "CopyPaste"
+
+# 选择相关
+[selection]
+	# 选中文本是否复制到系统剪切板
+	save_to_clipboard = true
+	# 分割语义化单词的分隔符，这个会影响到鼠标双击左键的单词选中。
+    # 比如 @ 作为分割 username 和 password 的字符，默认配置里面竞是没有的。。。
+	semantic_escape_chars = ",│`|:\"' ()[]{}<>\t@="
+
+
+	
+	
+[scrolling]
+	history = 1000
+	multiplier = 1
+
+[keyboard]
+bindings = [
+{ key = "l", mods = "Alt", action = "CreateNewWindow" },
+]
+
+
