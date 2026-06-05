@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# orctl - systemctl-like wrapper for OpenRC
+set -uo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [service] [options]
+
+Commands:
+  start/stop/restart   Control service state
+  reload               Reload service if supported
+  status               Show service status
+  enable               Enable service (add to runlevel)
+  disable              Disable service (remove from runlevel)
+  is-active            Return 0 if running, 3 otherwise
+  is-enabled           Return 0 if enabled in runlevel, 1 otherwise
+  daemon-reload        No-op (OpenRC handles deps dynamically)
+  list                 List enabled services in runlevel
+  help                 Show this help
+
+Options:
+  --runlevel=<level>   Specify runlevel (default: default)
+  --now                Apply action immediately (start/stop service)
+  -h, --help           Show help
+
+Examples:
+  $(basename "$0") start sshd
+  $(basename "$0") enable --now docker --runlevel=boot
+  $(basename "$0") is-active nginx
+  $(basename "$0") list --runlevel=default
+EOF
+  exit "${1:-1}"
+}
+
+# 检查 OpenRC 基础环境
+command -v rc-update >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1 || {
+  echo "Error: OpenRC tools (rc-update/rc-service) not found." >&2
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage 1
+
+cmd="$1"
+shift
+
+svc=""
+runlevel="default"
+now=false
+
+case "$cmd" in
+  -h|--help|help)
+    usage 0
+    ;;
+esac
+
+# 灵活解析参数（支持任意顺序）
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runlevel=*)
+      runlevel="${1#*=}"
+      ;;
+    --now)
+      now=true
+      ;;
+    -h|--help)
+      usage 0
+      ;;
+    -*)
+      echo "Error: Unsupported option '$1' for command '$cmd'" >&2
+      usage 1
+      ;;
+    *)
+      if [[ -z "$svc" ]]; then
+        svc="$1"
+      else
+        echo "Error: Unexpected argument '$1'" >&2
+        usage 1
+      fi
+      ;;
+  esac
+  shift
+done
+
+check_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || {
+    echo "Error: '$cmd' requires root privileges." >&2
+    exit 1
+  }
+}
+
+check_svc() {
+  [[ -e "/etc/init.d/$svc" || -e "/lib/rc/init.d/$svc" ]] || {
+    echo "Error: Service '$svc' not found in /etc/init.d/ or /lib/rc/init.d/" >&2
+    exit 1
+  }
+}
+
+require_svc() {
+  [[ -n "$svc" ]] || {
+    echo "Error: Service name is required for command '$cmd'." >&2
+    usage 1
+  }
+}
+
+is_enabled_in_runlevel() {
+  # 优先使用 OpenRC 查询接口，而不是直接依赖符号链接实现
+  rc-update show "$runlevel" 2>/dev/null | awk '{print $1}' | grep -Fxq "$svc"
+}
+
+case "$cmd" in
+  start|stop|restart|reload)
+    require_svc
+    check_root
+    check_svc
+    rc-service "$svc" "$cmd"
+    ;;
+
+  status)
+    require_svc
+    check_svc
+    rc-service "$svc" status
+    ;;
+
+  enable)
+    require_svc
+    check_root
+    check_svc
+    rc-update add "$svc" "$runlevel"
+    $now && rc-service "$svc" start
+    ;;
+
+  disable)
+    require_svc
+    check_root
+    check_svc
+    $now && { rc-service "$svc" stop || true; }
+    rc-update remove "$svc" "$runlevel"
+    ;;
+
+  is-active)
+    require_svc
+    check_svc
+    rc-service "$svc" status >/dev/null 2>&1
+    rc=$?
+    # 兼容 systemctl: active=0, inactive=3
+    if [[ $rc -eq 0 ]]; then
+      exit 0
+    else
+      exit 3
+    fi
+    ;;
+
+  is-enabled)
+    require_svc
+    check_svc
+    if is_enabled_in_runlevel; then
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
+
+  daemon-reload)
+    # OpenRC 下相当于 no-op
+    exit 0
+    ;;
+
+  list)
+    rc-update show "$runlevel" 2>/dev/null | awk '{print $1}' | sed '/^$/d' | sort -u
+    ;;
+
+  *)
+    echo "Error: Unknown command '$cmd'" >&2
+    usage 1
+    ;;
+esac
+

@@ -1,0 +1,5 @@
+# 让 Git 自动处理所有文本文件的换行符
+* text=auto
+
+# 强制所有 shell 脚本在仓库和工作区中都使用 LF 换行符
+*.sh text eol=lf

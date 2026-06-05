@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# emg - intuitive Portage wrapper for Gentoo
+set -euo pipefail
+
+prog="$(basename "$0")"
+
+usage() {
+  cat <<EOF
+Usage: $prog <command> [packages...] [options]
+
+Commands:
+  sync                  同步 Portage 树
+  upgrade               深度升级系统 (@world)
+  install <pkg...>      安装/编译软件包
+  remove <pkg...>       安全卸载软件包（依赖感知）
+  purge <pkg...>        强制卸载软件包（不检查依赖，危险）
+  search <kw...>        搜索软件包（优先 eix）
+  searchdesc <kw...>    按名称+描述搜索软件包
+  preview [pkg...]      预演计划；无参数时预演系统升级，有参数时预演指定包
+  rebuild               重建受库文件变更影响的包 (@preserved-rebuild)
+  clean                 清理不再需要的孤立依赖
+  deselect <pkg...>     取消 @world 追踪（保留已安装文件）
+  installed             列出系统中已安装的包
+  info <pkg...>         显示包/系统 emerge 信息
+  resume                继续上次失败的 emerge
+  sets                  列出可用 package sets
+  help                  显示帮助
+
+Options:
+  -y, --yes             自动确认（不加时默认 --ask）
+  -p, --pretend         仅预演，不实际执行（对 install/remove/purge/upgrade/clean/rebuild 有效）
+  -h, --help            显示帮助
+
+Examples:
+  $prog sync
+  $prog upgrade -y
+  $prog preview
+  $prog preview dev-vcs/git app-editors/vim
+  $prog install -y net-nds/openldap
+  $prog remove app-editors/vim
+  $prog purge app-editors/vim
+  $prog rebuild
+EOF
+  exit "${1:-0}"
+}
+
+need_root() {
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || {
+    echo "Error: '$cmd' 需要 root 权限" >&2
+    exit 1
+  }
+}
+
+need_args() {
+  [[ ${#pkgs[@]} -gt 0 ]] || {
+    echo "Error: '$cmd' 需要至少一个参数" >&2
+    exit 1
+  }
+}
+
+command -v emerge >/dev/null 2>&1 || {
+  echo "Error: 未找到 emerge" >&2
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage 1
+
+cmd=""
+yes=false
+pretend=false
+pkgs=()
+
+# 允许选项与参数混排，但第一个命令字必须出现
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    sync|upgrade|install|remove|purge|search|searchdesc|preview|rebuild|clean|deselect|installed|info|resume|sets|help)
+      if [[ -z "$cmd" ]]; then
+        cmd="$1"
+      else
+        pkgs+=("$1")
+      fi
+      ;;
+    -y|--yes)
+      yes=true
+      ;;
+    -p|--pretend)
+      pretend=true
+      ;;
+    -h|--help)
+      usage 0
+      ;;
+    -*)
+      echo "Error: 不支持的选项 '$1'" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$cmd" ]]; then
+        echo "Error: 请先指定命令，再传包名/关键词：'$1'" >&2
+        usage 1
+      fi
+      pkgs+=("$1")
+      ;;
+  esac
+  shift
+done
+
+[[ -z "$cmd" ]] && usage 1
+
+# 默认使用 --ask；传 -y 时自动确认
+ask_opts=()
+if ! $yes && ! $pretend; then
+  ask_opts+=(--ask)
+fi
+
+pretend_opts=()
+$pretend && pretend_opts+=(--pretend)
+
+verbose_opts=(--verbose)
+
+case "$cmd" in
+  help)
+    usage 0
+    ;;
+
+  sync)
+    need_root
+    exec emerge --sync
+    ;;
+
+  upgrade)
+    need_root
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" "${verbose_opts[@]}" \
+      --update --deep --newuse @world
+    ;;
+
+  install)
+    need_root
+    need_args
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" "${verbose_opts[@]}" \
+      "${pkgs[@]}"
+    ;;
+
+  remove)
+    need_root
+    need_args
+    # 安全删除：dependency-aware
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" "${verbose_opts[@]}" \
+      --depclean "${pkgs[@]}"
+    ;;
+
+  purge)
+    need_root
+    need_args
+    # 危险删除：不检查依赖
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" "${verbose_opts[@]}" \
+      --unmerge "${pkgs[@]}"
+    ;;
+
+  search)
+    need_args
+    if command -v eix >/dev/null 2>&1; then
+      exec eix "${pkgs[@]}"
+    else
+      exec emerge --search "${pkgs[*]}"
+    fi
+    ;;
+
+  searchdesc)
+    need_args
+    if command -v eix >/dev/null 2>&1; then
+      # eix 默认就会显示描述，作为更快的搜索后端
+      exec eix "${pkgs[@]}"
+    else
+      exec emerge --searchdesc "${pkgs[*]}"
+    fi
+    ;;
+
+  preview)
+    # 无参数 => 预演系统升级；有参数 => 预演指定包
+    if [[ ${#pkgs[@]} -eq 0 ]]; then
+      exec emerge --pretend --verbose --update --deep --newuse @world
+    else
+      exec emerge --pretend --verbose "${pkgs[@]}"
+    fi
+    ;;
+
+  rebuild)
+    need_root
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" @preserved-rebuild
+    ;;
+
+  clean)
+    need_root
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" "${verbose_opts[@]}" \
+      --depclean
+    ;;
+
+  deselect)
+    need_root
+    need_args
+    exec emerge "${ask_opts[@]}" "${pretend_opts[@]}" "${verbose_opts[@]}" \
+      --deselect "${pkgs[@]}"
+    ;;
+
+  installed)
+    if command -v qlist >/dev/null 2>&1; then
+      exec qlist -I | sort
+    elif command -v eix >/dev/null 2>&1; then
+      exec eix -I
+    else
+      echo "Error: 未找到 qlist 或 eix。可安装 app-portage/portage-utils 或 app-portage/eix" >&2
+      exit 1
+    fi
+    ;;
+
+  info)
+    if [[ ${#pkgs[@]} -eq 0 ]]; then
+      exec emerge --info
+    else
+      exec emerge --info "${pkgs[@]}"
+    fi
+    ;;
+
+  resume)
+    need_root
+    exec emerge --resume
+    ;;
+
+  sets)
+    exec emerge --list-sets
+    ;;
+
+  *)
+    echo "Error: 未知命令 '$cmd'" >&2
+    usage 1
+    ;;
+esac
+

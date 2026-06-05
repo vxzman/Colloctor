@@ -1,0 +1,456 @@
+---
+
+### 优化后的 `/usr/local/bin/pxmctl`
+
+主要改动：
+1. **新增 `CORE_NAME` 格式校验**：明确禁止包含 `@` 符号，引导使用扁平化命名（如 `xray-home`）。
+2. **`tun_cleanup` 完全静默化**：找不到脚本时直接跳过，不输出任何提示或错误，避免干扰正常日志。
+
+```bash
+#!/bin/bash
+
+set -e
+
+# ---------------- Requirements Check ----------------
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root!"
+    exit 1
+fi
+
+MODE="$1"
+ACTION="$2"
+VALID_MODES="tun tproxy redir-tproxy socks"
+
+# ---------------- Load Main Configuration ----------------
+
+MAIN_CONFIG="/etc/pxm/pxm.conf"
+
+if [ ! -f "$MAIN_CONFIG" ]; then
+    echo "Error: Main config file not found: $MAIN_CONFIG"
+    echo "HINT: Please create it and define CORE_NAME (e.g., CORE_NAME=\"sing-box\")"
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$MAIN_CONFIG"
+
+if [ -z "$CORE_NAME" ]; then
+    echo "Error: CORE_NAME is not set in $MAIN_CONFIG"
+    exit 1
+fi
+
+# ==================== 核心优化 1：禁止 CORE_NAME 包含 @ ====================
+if [[ "$CORE_NAME" == *"@"* ]]; then
+    echo "Error: CORE_NAME must not contain '@' to avoid systemd instance naming conflicts."
+    echo "HINT: Use flat names like 'xray-home' instead of 'xray@home'."
+    exit 1
+fi
+
+# ---------------- Dynamic Service Mapping ----------------
+
+declare -A MODE_SERVICES=(
+    [tun]="${CORE_NAME}@tun"
+    [tproxy]="${CORE_NAME}@tproxy tproxy@${CORE_NAME}"
+    [redir-tproxy]="${CORE_NAME}@redir-tproxy redir-tproxy@${CORE_NAME}"
+    [socks]="${CORE_NAME}@socks"
+)
+
+# ---------------- Dynamic Config Mapping ----------------
+
+declare -A MODE_CONFIGS=(
+    [tun]="${CORE_NAME}_tun.conf"
+    [tproxy]="${CORE_NAME}_tproxy.conf"
+    [redir-tproxy]="${CORE_NAME}_redir-tproxy.conf"
+    [socks]="${CORE_NAME}_socks.conf"
+)
+
+# ---------------- All Services List ----------------
+
+ALL_SERVICES="${MODE_SERVICES[tun]} ${MODE_SERVICES[tproxy]} ${MODE_SERVICES[redir-tproxy]} ${MODE_SERVICES[socks]}"
+
+# ---------------- Validate Mode ----------------
+
+validate_mode() {
+    case "$MODE" in
+        tun|tproxy|redir-tproxy|socks) ;;
+        *)
+            echo "Error: Invalid mode '$MODE'"
+            echo "Valid modes: $VALID_MODES"
+            exit 1
+            ;;
+    esac
+}
+
+# ---------------- Configuration Check ----------------
+
+check_config() {
+    local config="/etc/pxm/${MODE_CONFIGS[$MODE]}"
+    
+    if [[ "$MODE" == "tproxy" || "$MODE" == "redir-tproxy" ]]; then
+        if [ ! -f "$config" ]; then
+            echo "Error: config file not found: $config"
+            echo "HINT: Please create /etc/pxm/${MODE_CONFIGS[$MODE]}"
+            exit 1
+        fi
+    fi
+
+    if ! systemctl list-unit-files | grep -qE "^${CORE_NAME}(\.service|@)"; then
+        echo "WARN: systemd service matching '${CORE_NAME}' not found. Please check CORE_NAME in $MAIN_CONFIG"
+    fi
+}
+
+# ---------------- Helper: Check if service is alive ----------------
+
+is_service_alive() {
+    local svc="$1"
+    local state
+    state="$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "inactive")"
+    case "$state" in
+        active|activating|reloading) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------------- Helper: Stop Services ----------------
+
+stop_services() {
+    local services="$1"
+    local label="${2:-}"
+    for svc in $services; do
+        if is_service_alive "$svc"; then
+            echo "  [STOP]   ${label:+$label }$svc"
+            systemctl stop "$svc" 2>/dev/null || true
+        fi
+    done
+}
+
+# ==================== 核心优化 2：TUN 清理完全静默化 ====================
+tun_cleanup() {
+    # 现代代理核心 (如 sing-box, 新版 mihomo) 通常能自动清理 TUN 接口和路由。
+    # 此函数仅作为历史遗留或特殊自定义清理脚本的兼容入口。
+    # 如果脚本不存在，静默跳过，绝不报错或输出冗余日志。
+    local cleanup_scripts=(
+        "/usr/local/bin/pxm_tun_stop.sh"
+        "/usr/local/bin/mihomo_tun_stop.sh"
+    )
+    for script in "${cleanup_scripts[@]}"; do
+        if [ -f "$script" ] && [ -x "$script" ]; then
+            bash "$script" >/dev/null 2>&1 || true
+            break
+        fi
+    done
+}
+
+# ---------------- Stop Mode ----------------
+
+stop_mode() {
+    local services="${MODE_SERVICES[$MODE]}"
+    local was_alive=false
+
+    for svc in $services; do
+        if is_service_alive "$svc"; then
+            was_alive=true
+            break
+        fi
+    done
+
+    case "$MODE" in
+        tun)
+            systemctl stop "${CORE_NAME}@tun" 2>/dev/null || true
+            sleep 1
+            tun_cleanup
+            echo " [OK] TUN interceptor stopped."
+            ;;
+        tproxy)
+            systemctl stop "tproxy@${CORE_NAME}" 2>/dev/null || true
+            systemctl stop "${CORE_NAME}@tproxy" 2>/dev/null || true
+            echo " [OK] TProxy interceptor stopped."
+            ;;
+        redir-tproxy)
+            systemctl stop "redir-tproxy@${CORE_NAME}" 2>/dev/null || true
+            systemctl stop "${CORE_NAME}@redir-tproxy" 2>/dev/null || true
+            echo " [OK] Redir-TProxy interceptor stopped."
+            ;;
+        socks)
+            systemctl stop "${CORE_NAME}@socks" 2>/dev/null || true
+            echo " [OK] SOCKS interceptor stopped."
+            ;;
+    esac
+
+    if [ "$was_alive" = false ]; then
+        echo " (Note: $MODE mode was not running)"
+    fi
+}
+
+# ---------------- Stop Other Modes ----------------
+
+stop_all_other_modes() {
+    local target_mode="$1"
+    local target_services="${MODE_SERVICES[$target_mode]}"
+    local stopped_any=false
+    local tun_was_alive=false
+
+    if [ "$target_mode" != "tun" ]; then
+        if is_service_alive "${CORE_NAME}@tun"; then
+            tun_was_alive=true
+        fi
+    fi
+
+    for svc in $ALL_SERVICES; do
+        if echo " $target_services " | grep -q " $svc "; then
+            continue
+        fi
+
+        if is_service_alive "$svc"; then
+            if [ "$stopped_any" = false ]; then
+                echo " Stopping other active modes..."
+                stopped_any=true
+            fi
+            echo "  [STOP]   $svc"
+            systemctl stop "$svc" 2>/dev/null || true
+        fi
+    done
+
+    if [ "$tun_was_alive" = true ]; then
+        sleep 1
+        tun_cleanup
+    fi
+}
+
+# ---------------- Cleanup Partial State ----------------
+
+stop_target_mode_services() {
+    local services="${MODE_SERVICES[$MODE]}"
+    local any_alive=false
+
+    for svc in $services; do
+        if is_service_alive "$svc"; then
+            any_alive=true
+            break
+        fi
+    done
+
+    if [ "$any_alive" = true ]; then
+        echo " Cleaning up partially running $MODE mode services..."
+        case "$MODE" in
+            tproxy|redir-tproxy)
+                local reversed=""
+                for svc in $services; do
+                    reversed="$svc $reversed"
+                done
+                stop_services "$reversed"
+                ;;
+            tun)
+                stop_services "$services"
+                sleep 1
+                tun_cleanup
+                ;;
+            *)
+                stop_services "$services"
+                ;;
+        esac
+    fi
+}
+
+# ---------------- Start Mode ----------------
+
+start_mode() {
+    check_config
+    stop_target_mode_services
+    stop_all_other_modes "$MODE"
+
+    case "$MODE" in
+        tun)
+            echo " Starting TUN Interceptor..."
+            systemctl start "${CORE_NAME}@tun"
+            echo " [OK] TUN interceptor started."
+            ;;
+        tproxy)
+            echo " Starting TProxy Interceptor..."
+            systemctl start "${CORE_NAME}@tproxy"
+            sleep 1
+            systemctl start "tproxy@${CORE_NAME}"
+            if is_service_alive "${CORE_NAME}@tproxy" && is_service_alive "tproxy@${CORE_NAME}"; then
+                echo " [OK] TProxy interceptor started."
+            else
+                echo " [WARN] TProxy may not have started correctly."
+                echo "        Check: pxmctl tproxy status"
+            fi
+            ;;
+        redir-tproxy)
+            echo " Starting Redir-TProxy Interceptor..."
+            systemctl start "${CORE_NAME}@redir-tproxy"
+            sleep 1
+            systemctl start "redir-tproxy@${CORE_NAME}"
+            if is_service_alive "${CORE_NAME}@redir-tproxy" && is_service_alive "redir-tproxy@${CORE_NAME}"; then
+                echo " [OK] Redir-TProxy interceptor started."
+            else
+                echo " [WARN] Redir-TProxy may not have started correctly."
+                echo "        Check: pxmctl redir-tproxy status"
+            fi
+            ;;
+        socks)
+            echo " Starting SOCKS Interceptor..."
+            systemctl start "${CORE_NAME}@socks"
+            echo " [OK] SOCKS interceptor started."
+            ;;
+    esac
+}
+
+# ---------------- Get Mode State ----------------
+
+get_mode_state() {
+    local mode="$1"
+    local services="${MODE_SERVICES[$mode]}"
+    local total=0
+    local alive=0
+
+    for svc in $services; do
+        total=$((total + 1))
+        if is_service_alive "$svc"; then
+            alive=$((alive + 1))
+        fi
+    done
+
+    if [ "$alive" -eq "$total" ]; then
+        echo "active"
+    elif [ "$alive" -gt 0 ]; then
+        echo "partial"
+    else
+        echo "inactive"
+    fi
+}
+
+# ---------------- JSON Status ----------------
+
+status_json() {
+    local active_mode=""
+    local json='{"modes":{'
+    local first=true
+
+    for mode in tun tproxy redir-tproxy socks; do
+        local state
+        state="$(get_mode_state "$mode")"
+        if [ "$first" = true ]; then
+            first=false
+        else
+            json="${json},"
+        fi
+        json="${json}\"${mode}\":{\"status\":\"${state}\"}"
+        if [ "$state" = "active" ] && [ -z "$active_mode" ]; then
+            active_mode="$mode"
+        fi
+    done
+
+    if [ -n "$active_mode" ]; then
+        json="${json}},\"activeMode\":\"${active_mode}\",\"core\":\"${CORE_NAME}\"}"
+    else
+        json="${json}},\"activeMode\":null,\"core\":\"${CORE_NAME}\"}"
+    fi
+    echo "$json"
+}
+
+# ---------------- Status ----------------
+
+status_mode() {
+    if [ "${3:-}" = "--json" ] || [ "${3:-}" = "-j" ]; then
+        status_json
+        return
+    fi
+
+    echo " PXM Transparent Proxy Status (Core: $CORE_NAME)"
+    echo " ─────────────────────────────────────────"
+
+    for mode in tun tproxy redir-tproxy socks; do
+        state="$(get_mode_state "$mode")"
+        case "$state" in
+            active)   echo "  [ACTIVE]   $mode mode" ;;
+            partial)  echo "  [PARTIAL]  $mode mode" ;;
+            inactive) echo "  [INACTIVE] $mode mode" ;;
+        esac
+    done
+
+    echo ""
+    echo " Service Details:"
+    for svc in $ALL_SERVICES; do
+        local state
+        state="$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "inactive")"
+        case "$state" in
+            active)     echo "    [ACTIVE]      $svc" ;;
+            activating) echo "    [ACTIVATING]  $svc" ;;
+            failed)     echo "    [FAILED]      $svc" ;;
+            *)          echo "    [INACTIVE]    $svc" ;;
+        esac
+    done
+}
+
+# ---------------- Logs ----------------
+
+show_logs() {
+    local count="${3:-50}"
+    local services="${MODE_SERVICES[$MODE]}"
+    local journal_units=""
+    
+    for svc in $services; do
+        journal_units="$journal_units -u $svc"
+    done
+    
+    # shellcheck disable=SC2086
+    journalctl $journal_units --no-pager -n "$count"
+}
+
+# ---------------- Main ----------------
+
+if [ "${1:-}" = "--json" ] || [ "${1:-}" = "-j" ]; then
+    status_json
+    exit 0
+fi
+
+if [ -z "$MODE" ] || [ -z "$ACTION" ]; then
+    echo "Usage:"
+    echo "  $0 {tun|tproxy|redir-tproxy|socks} {start|stop|restart|status|log [lines]}"
+    echo "  $0 --json"
+    echo ""
+    echo "Available modes:"
+    echo "  tun"
+    echo "  tproxy"
+    echo "  redir-tproxy"
+    echo "  socks"
+    echo ""
+    echo "Current Core: ${CORE_NAME:-Not Set}"
+    exit 1
+fi
+
+validate_mode
+
+case "$ACTION" in
+    start)    start_mode ;;
+    stop)     stop_mode ;;
+    restart)  stop_mode; start_mode ;;
+    status)   status_mode "$@" ;;
+    log)      show_logs "$@" ;;
+    *)
+        echo "Error: Invalid action '$ACTION'"
+        echo "Valid actions: start, stop, restart, status, log"
+        exit 1
+        ;;
+esac
+```
+
+### 💡 更新后的配置建议
+
+现在，您的 `/etc/pxm/pxm.conf` 应该保持最简洁的扁平化命名：
+
+```ini
+# /etc/pxm/pxm.conf
+# 仅填写核心名称，严禁包含 '@'
+CORE_NAME="sing-box"
+```
+
+如果您未来真的需要在一台机器上跑两个不同的 `xray` 实例，正确的做法是：
+1. 创建独立的服务文件：`/etc/systemd/system/xray-home.service` 和 `/etc/systemd/system/xray-work.service`。
+2. 在 `pxm.conf` 中分别填写 `CORE_NAME="xray-home"` 或 `CORE_NAME="xray-work"`。
+
+这样生成的服务名将是 `xray-home@tproxy` 和 `tproxy@xray-home`，清晰、安全且完全符合 systemd 的最佳实践。
+同时，TUN 模式的启停也将如丝般顺滑，不再有任何多余的清理报错干扰您的视线。

@@ -1,0 +1,16 @@
+[Unit]
+Description=Transparent Proxy Mixed Mode (TCP REDIRECT + UDP TPROXY) for %i
+After=network-online.target %i.service
+BindsTo=%i.service
+Requires=network-online.target
+Conflicts=redir-tproxy@*.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=TPROXY_INSTANCE=%i
+ExecStart=/usr/local/libexec/redir-tproxy.sh start
+ExecStop=/usr/local/libexec/redir-tproxy.sh stop
+
+[Install]
+WantedBy=multi-user.target
